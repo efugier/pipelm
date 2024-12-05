@@ -25,6 +25,7 @@ serde_json = "1"
 toml = "0"
 env_logger = "0"
 reqwest = { version = "0", default-features = false, features = ["http2", "json", "blocking", "multipart", "rustls-tls"] }
+regex = "1.11.1"
 
 [dev-dependencies]
 tempfile = "3"

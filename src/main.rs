@@ -6,13 +6,13 @@ mod utils;
 use crate::config::{
     api::Api,
     ensure_config_usable,
-    prompt::{conversation_file_path, get_last_conversation_as_prompt, get_prompts, Prompt},
+    prompt::{get_last_conversation_as_prompt, save_conversation, get_prompts, Prompt},
 };
 use prompt_customization::customize_prompt;
+use crate::utils::valid_conversation_name;
 
 use clap::{Args, Parser};
 use log::debug;
-use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 
 use text::process_input_with_request;
@@ -56,6 +56,9 @@ struct Cli {
     /// whether to repeat the input before the output, useful to extend instead of replacing
     #[arg(short, long)]
     repeat_input: bool,
+    /// conversation name
+    #[arg(short, long, value_parser = valid_conversation_name)]
+    name: Option<String>,
     #[command(flatten)]
     prompt_params: PromptParams,
 }
@@ -113,19 +116,29 @@ fn main() {
     let is_piped = !stdin.is_terminal();
     let mut prompt_customizaton_text: Option<String> = None;
 
-    let prompt: Prompt = if !args.extend_conversation {
-        // try to get prompt matching the first arg and use second arg as customization text
-        // if it doesn't use default prompt and treat that first arg as customization text
-        get_default_and_or_custom_prompt(&args, &mut prompt_customizaton_text)
-    } else {
-        prompt_customizaton_text = args.input_or_template_ref;
+    let prompt = if args.extend_conversation {
+        prompt_customizaton_text = args.input_or_template_ref.clone();
+
         if args.input_if_template_ref.is_some() {
             panic!(
                 "Invalid parameters, cannot provide a config ref when extending a conversation.\n\
                 Use `sc -e \"<your_prompt>.\"`"
             );
         }
-        get_last_conversation_as_prompt()
+
+        match get_last_conversation_as_prompt(args.name.as_deref()) {
+            Some(prompt) => prompt,
+            None => {
+                if args.name.is_some() {
+                    panic!("Named conversation does not exist: {}", args.name.unwrap());
+                }
+                get_default_and_or_custom_prompt(&args, &mut prompt_customizaton_text)
+            }
+        }
+    } else {
+        // try to get prompt matching the first arg and use second arg as customization text
+        // if it doesn't use default prompt and treat that first arg as customization text
+        get_default_and_or_custom_prompt(&args, &mut prompt_customizaton_text)
     };
 
     // if no text was piped, use the custom prompt as input
@@ -146,13 +159,9 @@ fn main() {
     debug!("{:?}", prompt);
 
     match process_input_with_request(prompt, input, &mut output, args.repeat_input) {
-        Ok(prompt) => {
-            let toml_string =
-                toml::to_string(&prompt).expect("Failed to serialize prompt after response.");
-            let mut file = fs::File::create(conversation_file_path())
-                .expect("Failed to create the conversation save file.");
-            file.write_all(toml_string.as_bytes())
-                .expect("Failed to write to the conversation file.");
+        Ok(new_prompt) => {
+        save_conversation(&new_prompt, args.name.as_deref())
+            .expect("Failed to save conversation");
         }
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -203,4 +212,122 @@ fn get_default_and_or_custom_prompt(
             .remove(DEFAULT_PROMPT_NAME)
             .expect(&prompt_not_found_error)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::prompt::{Prompt, Message};
+    use tempfile::tempdir;
+    use serial_test::serial;
+
+    fn setup() -> tempfile::TempDir {
+        let temp_dir = tempdir().unwrap();
+        std::env::set_var("SMARTCAT_CONFIG_PATH", temp_dir.path());
+        temp_dir
+    }
+
+    fn create_test_prompt() -> Prompt {
+        let mut prompt = Prompt::default();
+        prompt.messages = vec![(Message::user("test"))];
+        prompt
+    }
+
+    #[test]
+    #[serial]
+    fn test_cli_with_nonexistent_conversation() {
+        let _temp_dir = setup();
+
+        let args = Cli {
+            input_or_template_ref: Some("test_input".to_string()),
+            input_if_template_ref: None,
+            extend_conversation: true,
+            repeat_input: false,
+            name: Some("nonexistent_conversation".to_string()),
+            prompt_params: PromptParams::default(),
+        };
+
+        // Test that getting a nonexistent conversation returns None
+        let prompt = get_last_conversation_as_prompt(args.name.as_deref());
+        assert!(prompt.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_cli_with_existing_conversation() {
+        let _temp_dir = setup();
+
+        // Create a test conversation
+        let test_prompt = create_test_prompt();
+        save_conversation(&test_prompt, Some("test_conversation")).unwrap();
+
+        let args = Cli {
+            input_or_template_ref: Some("test_input".to_string()),
+            input_if_template_ref: None,
+            extend_conversation: true,
+            repeat_input: false,
+            name: Some("test_conversation".to_string()),
+            prompt_params: PromptParams::default(),
+        };
+
+        // Test retrieving the saved conversation
+        let prompt = get_last_conversation_as_prompt(args.name.as_deref());
+        assert!(prompt.is_some());
+        assert_eq!(prompt.unwrap(), test_prompt);
+    }
+
+    #[test]
+    #[serial]
+    fn test_valid_conversation_name() {
+        assert!(valid_conversation_name("valid_name").is_ok());
+        assert!(valid_conversation_name("valid-name").is_ok());
+        assert!(valid_conversation_name("valid123").is_ok());
+        assert!(valid_conversation_name("VALID_NAME").is_ok());
+
+        assert!(valid_conversation_name("invalid name").is_err());
+        assert!(valid_conversation_name("invalid/name").is_err());
+        assert!(valid_conversation_name("invalid.name").is_err());
+        assert!(valid_conversation_name("").is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn test_conversation_persistence() {
+        let _temp_dir = setup();
+        let test_prompt = create_test_prompt();
+
+        // Test saving and loading default conversation
+        save_conversation(&test_prompt, None).unwrap();
+        let loaded_prompt = get_last_conversation_as_prompt(None);
+        assert!(loaded_prompt.is_some());
+        assert_eq!(loaded_prompt.unwrap(), test_prompt);
+
+        // Test saving and loading named conversation
+        save_conversation(&test_prompt, Some("test_conv")).unwrap();
+        let loaded_named_prompt = get_last_conversation_as_prompt(Some("test_conv"));
+        assert!(loaded_named_prompt.is_some());
+        assert_eq!(loaded_named_prompt.unwrap(), test_prompt);
+    }
+
+    #[test]
+    #[serial]
+    fn test_default_prompt_fallback() {
+        let _temp_dir = setup();
+        let args = Cli {
+            input_or_template_ref: Some("test_input".to_string()),
+            input_if_template_ref: None,
+            extend_conversation: true,
+            repeat_input: false,
+            name: None,
+            prompt_params: PromptParams::default(),
+        };
+
+        let prompt = get_last_conversation_as_prompt(args.name.as_deref());
+        assert!(prompt.is_none()); // Should be None when no conversation exists
+
+        // Verify the prompt customization text is set correctly
+        let prompt_customization_text = args.input_or_template_ref;
+        assert_eq!(prompt_customization_text, Some("test_input".to_string()));
+    }
+
 }
