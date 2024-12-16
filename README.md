@@ -70,6 +70,14 @@ cargo install smartcat
 
 Run this command again to update `smartcat`.
 
+### Arch Linux
+
+If you are on Arch Linux, you can install the package from the [extra repository](https://archlinux.org/packages/extra/x86_64/smartcat/):
+
+```
+pacman -S smartcat
+```
+
 ### By downloading the binary
 
 Choose the one compiled for your platform on the [release page](https://github.com/efugier/smartcat/releases).
