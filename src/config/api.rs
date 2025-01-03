@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::str::FromStr;
 
 use super::{prompt::Prompt, resolve_config_path};
@@ -96,11 +97,13 @@ impl ApiConfig {
                 self.api_key_command.clone().map(|command| {
                     let output = if cfg!(windows) {
                         std::process::Command::new("cmd")
+                            .stdin(Stdio::inherit())
                             .arg("/c")
                             .arg(command)
                             .output()
                     } else {
                         std::process::Command::new("sh")
+                            .stdin(Stdio::inherit())
                             .arg("-c")
                             .arg(command)
                             .output()
